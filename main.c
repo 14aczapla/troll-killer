@@ -133,6 +133,7 @@ int porownaj_zadania(request_t a, request_t b) {
     if (a.lamport != b.lamport) {
         return a.lamport - b.lamport;
     }
+
     return a.src - b.src;
 }
 
@@ -153,13 +154,11 @@ void obsluz_kolejke(int city) {
     
     for (int i = 0; i < queue_sizes[city]; i++) {
         request_t req = city_queues[city][i];
-        if (COOLDOWN_TIME[city] == 0) {
             packet_t ack_pkt = {rank, lamport_clock, city, ACK};
             MPI_Send(&ack_pkt, 1, MPI_PAKIET_T, req.src, ACK, MPI_COMM_WORLD);
             printf("[%d] Wysyłam ACK do %d dla miasta %d (z kolejki)\n", rank, req.src, city);
             usun_z_kolejki(req.src, city);
             i--; // Ponieważ usunęliśmy element
-        }
     }
 }
 
@@ -173,10 +172,9 @@ void obsluz_ack(packet_t *pkt) {
             printf("\033[1;33m[%d] Wchodzę do miasta %d (Lamport: %d)\033[0m\n", rank, my_city, lamport_clock);
             
             state = IN_CITY;
-            time_t start_time = time(NULL);
-            time_t current_time = start_time;
+            int start_clock = lamport_clock;
             
-            while (difftime(current_time, start_time) < stay_time) {
+            while (lamport_clock - start_clock < stay_time) {
                 // Sprawdzanie wiadomości podczas pobytu w mieście
                 int flag;
                 MPI_Status status;
@@ -202,11 +200,9 @@ void obsluz_ack(packet_t *pkt) {
                                    rank, pkt.src, city, queue_sizes[city]);
                         }
                     }
-                    // ACK ignorujemy podczas pobytu w mieście
                 }
                 
-                sleep(1);
-                current_time = time(NULL);
+                lamport_clock += 1;
             }
             
             printf("\033[1;32m[%d] Opuszczam miasto %d po %d sekundach\033[0m\n", rank, my_city, stay_time);
@@ -214,13 +210,11 @@ void obsluz_ack(packet_t *pkt) {
             // Ustawienie czasu odnowienia dla miasta
             COOLDOWN_TIME[my_city] = rand() % 5 + 5;
             state = IDLE;
-            my_city = -1;
+            //my_city = -1;
             ack_count = 0;
             
-            // Obsłuż kolejkę żądań dla wszystkich miast
-            for (int city = 0; city < M; city++) {
-                obsluz_kolejke(city); //wyslanie ack do procesow w kolejce od miasta
-            }
+            obsluz_kolejke(my_city); //wyslanie ack do procesow w kolejce od miasta
+            my_city = -1;
         } else {
             printf("[%d] Miasto %d niedostępne (cooldown: %d), czekam...\n", rank, my_city, COOLDOWN_TIME[my_city]);
             state = WAITING;
@@ -255,12 +249,12 @@ void obsluz_req(packet_t *pkt) {
     }
 }
 
-void aktualizuj_cooldown() {
+void aktualizuj_cooldown(int clock) {
     for (int city = 0; city < M; city++) {
         if (COOLDOWN_TIME[city] > 0) {
-            COOLDOWN_TIME[city]--;
+            COOLDOWN_TIME[city] -= 1;
             if (COOLDOWN_TIME[city] == 0) {
-                printf("[%d] Miasto %d jest już dostępne\n", rank, city);
+                printf("[%d] Miasto %d jest już dostępne (clock: %d \n", rank, city, clock);
                 // Obsłuż kolejkę dla tego miasta gdy stanie się dostępne
                 //obsluz_kolejke(city);
             }
@@ -291,7 +285,7 @@ int main(int argc, char **argv) {
     
     // Główna pętla programu
     while (1) {
-        //aktualizuj_cooldown();
+        aktualizuj_cooldown(lamport_clock);
         
         // Losowe decyzje o wejściu do miasta
         if (state == IDLE && (rand() % 10) == 0) {
