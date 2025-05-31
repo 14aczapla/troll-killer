@@ -1,3 +1,6 @@
+/* ssh lab-net-25 true
+mpirun -H lab-net-25:4,lab-net-26:5 main*/
+
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,9 +41,14 @@ typedef struct {
     int city;
 } request_t;
 
+/*pakiet cooldown
+lamport 
+miasto
+cooldown*/
+
 #define NITEMS 4
 #define MAX_QUEUE_SIZE 100
-#define MAX_CITIES 2
+#define MAX_CITIES 4
 
 /* Typy wiadomości */
 #define REQ 1
@@ -115,18 +123,16 @@ bool dodaj_do_kolejki(int src, int lamport, int city) {
 }
 
 void usun_z_kolejki(int src, int city) {
-    int found_index = -1;
+    int found = 0;
     for (int i = 0; i < queue_sizes[city]; i++) {
         if (city_queues[city][i].src == src) {
-            found_index = i;
-            break;
+            found = 1;
+        }
+        if (found && i < queue_sizes[city] - 1) {
+            city_queues[city][i] = city_queues[city][i+1];
         }
     }
-
-    if (found_index != -1) {
-        for (int i = found_index; i < queue_sizes[city] - 1; i++) {
-            city_queues[city][i] = city_queues[city][i + 1];
-        }
+    if (found) {
         queue_sizes[city]--;
     }
 }
@@ -154,23 +160,18 @@ void sortuj_kolejke(int city) {
 void obsluz_kolejke(int city) {
     sortuj_kolejke(city);
     
-    // Sprawdź czy miasto jest dostępne
-    if (COOLDOWN_TIME[city] == 0) {
-        for (int i = 0; i < queue_sizes[city]; i++) {
-            request_t req = city_queues[city][i];
+    printf("[%d] Wysyłam ACK dla miasta %d (z kolejki)\n", rank, city);
+    for (int i = 0; i < queue_sizes[city]; i++) {
+        request_t req = city_queues[city][i];
             packet_t ack_pkt = {rank, lamport_clock, city, ACK};
             MPI_Send(&ack_pkt, 1, MPI_PAKIET_T, req.src, ACK, MPI_COMM_WORLD);
-            printf("[%d] Wysyłam ACK do %d dla miasta %d (z kolejki)\n", rank, req.src, city);
             usun_z_kolejki(req.src, city);
             i--; // Ponieważ usunęliśmy element
-        }
     }
 }
 
-
 void obsluz_ack(packet_t *pkt) {
     lamport_clock = (pkt->lamport > lamport_clock) ? pkt->lamport : lamport_clock;
-    lamport_clock++;
     ack_count++;
     
     if (ack_count == N-1) {     
@@ -190,8 +191,8 @@ void obsluz_ack(packet_t *pkt) {
                 if (flag) {
                     packet_t pkt;
                     MPI_Recv(&pkt, 1, MPI_PAKIET_T, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                    lamport_clock = (pkt.lamport > lamport_clock) ? pkt.lamport : lamport_clock;
-                    lamport_clock++;
+                    //lamport_clock = (pkt.lamport > lamport_clock) ? pkt.lamport : lamport_clock;
+                    //lamport_clock++;
                     
                     if (pkt.type == REQ) {
                         // Obsługa REQ podczas pobytu w mieście
@@ -203,8 +204,8 @@ void obsluz_ack(packet_t *pkt) {
                                    rank, pkt.src, city, lamport_clock, my_city);
                         } else {
                             dodaj_do_kolejki(pkt.src, pkt.lamport, city); //jezei w niej nie jest
-                            printf("[%d] Odkładam żądanie od %d dla miasta %d do kolejki (Rozmiar: %d) podczas pobytu w mieście\033[0m\n", 
-                                   rank, pkt.src, city, queue_sizes[city]);
+                            //printf("[%d] Odkładam żądanie od %d dla miasta %d do kolejki (Rozmiar: %d) podczas pobytu w mieście\033[0m\n", 
+                                   //rank, pkt.src, city, queue_sizes[city]);
                         }
                     }
                 }
@@ -213,9 +214,11 @@ void obsluz_ack(packet_t *pkt) {
             }
             
             printf("\033[1;32m[%d] Opuszczam miasto %d po %d sekundach\033[0m\n", rank, my_city, stay_time);
-            
+            srand(time(0));
             // Ustawienie czasu odnowienia dla miasta
             COOLDOWN_TIME[my_city] = rand() % 5 + 5;
+            //send cooldown do wszystkich
+            //printf("cooldown time: %d\n", COOLDOWN_TIME[my_city]);
             state = IDLE;
             //my_city = -1;
             ack_count = 0;
@@ -250,8 +253,8 @@ void obsluz_req(packet_t *pkt) {
     } else {
          //jezeli w niej nie jest
         if(dodaj_do_kolejki(pkt->src, pkt->lamport, city)) {
-        printf("[%d] Odkładam żądanie od %d dla miasta %d do kolejki (Rozmiar: %d)\n", 
-                rank, pkt->src, city, queue_sizes[city]);
+        //printf("[%d]Odkładam żądanie od %d dla miasta %d do kolejki (Rozmiar: %d)\n", 
+                //rank, pkt->src, city, queue_sizes[city]);
         }
     }
 }
@@ -263,20 +266,20 @@ void aktualizuj_cooldown(int clock) {
             if (COOLDOWN_TIME[city] == 0) {
                 printf("[%d] Miasto %d jest już dostępne (clock: %d \n", rank, city, clock);
                 // Obsłuż kolejkę dla tego miasta gdy stanie się dostępne
-                obsluz_kolejke(city);
+                //obsluz_kolejke(city);
             }
         }
     }
     
     // Jeśli czekaliśmy na dostępne miasto
-    if (state == WAITING && COOLDOWN_TIME[my_city] == 0) {
-        state = REQUESTING;
-        lamport_clock++;
-        packet_t req_pkt = {rank, lamport_clock, my_city, REQ};
-        wyslij_do_wszystkich(&req_pkt, REQ);
-        ack_count = 0;
-        printf("[%d] Ponawiam REQ dla miasta %d (Lamport: %d)\n", rank, my_city, lamport_clock);
-    }
+    // if (state == WAITING && COOLDOWN_TIME[my_city] == 0) {
+    //     state = REQUESTING;
+    //     lamport_clock++;
+    //     packet_t req_pkt = {rank, lamport_clock, my_city, REQ};
+    //     wyslij_do_wszystkich(&req_pkt, REQ);
+    //     ack_count = 0;
+    //     printf("[%d] Ponawiam REQ dla miasta %d (Lamport: %d)\n", rank, my_city, lamport_clock);
+    // }
 }
 
 int main(int argc, char **argv) {
@@ -284,7 +287,6 @@ int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &N);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    srand(time(NULL) + rank);
     
     inicjuj_typ_pakietu();
 
@@ -295,7 +297,7 @@ int main(int argc, char **argv) {
         aktualizuj_cooldown(lamport_clock);
         
         // Losowe decyzje o wejściu do miasta
-        if (state == IDLE && (rand() % 10) == 0) {
+        if (state == IDLE && (rand() % 3) == 0) {
             state = REQUESTING;
             my_city = przydzial_miasta(rank, lamport_clock);
             lamport_clock++;
@@ -308,20 +310,23 @@ int main(int argc, char **argv) {
             printf("\33[1;35m[%d] Wysyłam REQ dla miasta %d (Lamport: %d)\033[0m\n", rank, my_city, lamport_clock);
         }
         
-        // Sprawdź czy są wiadomości do odebrania
-        int flag;
-        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
-        
-        if (flag) {
-            packet_t pkt;
-            MPI_Recv(&pkt, 1, MPI_PAKIET_T, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-            lamport_clock = (pkt.lamport > lamport_clock) ? pkt.lamport : lamport_clock;
-            lamport_clock++;
+        // Sprawdź czy są wiadomości do odebrania (tylko jeśli nie jesteśmy w mieście)
+        if (state != IN_CITY) {
+            int flag;
+            MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
             
-            if (pkt.type == REQ) {
-                obsluz_req(&pkt);
-            } else if (pkt.type == ACK) {
-                obsluz_ack(&pkt);
+            if (flag) {
+                packet_t pkt;
+                MPI_Recv(&pkt, 1, MPI_PAKIET_T, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                //lamport_clock = (pkt.lamport > lamport_clock) ? pkt.lamport : lamport_clock;
+                //lamport_clock++;
+                
+                if (pkt.type == REQ) {
+                    obsluz_req(&pkt);
+                } else if (pkt.type == ACK) {
+                    obsluz_ack(&pkt);
+                } //else
+                 //obsloz cooldown
             }
         }
         
