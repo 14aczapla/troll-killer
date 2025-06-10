@@ -127,46 +127,90 @@ bool add_to_queue(int src, int lamport, int city) {
         return FALSE;
     }
     
-    // Check if already in queue
+    // Sprawdź czy żądanie już istnieje w kolejce
     for (int i = 0; i < queue_sizes[city]; i++) {
-        if (city_queues[city][i].src == src && city_queues[city][i].lamport == lamport) {
-            return FALSE;
-        }
+    if (city_queues[city][i].src == src &&
+        city_queues[city][i].lamport == lamport) {
+        return FALSE;  // już mamy to żądanie
     }
+}
+
     
-    city_queues[city][queue_sizes[city]] = (request_t){src, lamport, city};
+    city_queues[city][queue_sizes[city]].src = src;
+    city_queues[city][queue_sizes[city]].lamport = lamport;
+    city_queues[city][queue_sizes[city]].city = city;
     queue_sizes[city]++;
     return TRUE;
 }
 
-int compare_requests(const void *a, const void *b) {
-    request_t *req_a = (request_t *)a;
-    request_t *req_b = (request_t *)b;
-    
-    if (req_a->lamport != req_b->lamport) {
-        return req_a->lamport - req_b->lamport;
+void delete_from_queue(int src, int city) {
+    int found = 0;
+    for (int i = 0; i < queue_sizes[city]; i++) {
+        if (city_queues[city][i].src == src) {
+            found = 1;
+        }
+        if (found && i < queue_sizes[city] - 1) {
+            city_queues[city][i] = city_queues[city][i+1];
+        }
     }
-    return req_a->src - req_b->src;
+    if (found) {
+        queue_sizes[city]--;
+    }
+}
+
+int compare_requests(request_t a, request_t b) {
+    if (a.lamport != b.lamport) {
+        return a.lamport - b.lamport;
+    }
+
+    return a.src - b.src;
 }
 
 void sort_queue(int city) {
-    qsort(city_queues[city], queue_sizes[city], sizeof(request_t), compare_requests);
+    for (int i = 0; i < queue_sizes[city]-1; i++) {
+        for (int j = 0; j < queue_sizes[city]-i-1; j++) {
+            if (compare_requests(city_queues[city][j], city_queues[city][j+1]) > 0) {
+                request_t temp = city_queues[city][j];
+                city_queues[city][j] = city_queues[city][j+1];
+                city_queues[city][j+1] = temp;
+            }
+        }
+    }
 }
 
+
 void process_queue(int city) {
-    if (COOLDOWN_TIME[city] > 0 || state != IDLE) {
-        return;
-    }
-    
     sort_queue(city);
     
     for (int i = 0; i < queue_sizes[city]; i++) {
         request_t req = city_queues[city][i];
-        packet_t ack_pkt = {rank, lamport_clock, city, ACK};
-        MPI_Send(&ack_pkt, 1, MPI_PAKIET_T, req.src, ACK, MPI_COMM_WORLD);
+            packet_t ack_pkt = {rank, lamport_clock, city, ACK};
+            MPI_Send(&ack_pkt, 1, MPI_PAKIET_T, req.src, ACK, MPI_COMM_WORLD);
+            delete_from_queue(req.src, city);
+            i--; // Ponieważ usunęliśmy element
     }
-    
-    queue_sizes[city] = 0;
+}
+
+void update_cooldowns() {
+    bool updated = FALSE;
+    for (int city = 0; city < M; city++) {
+        if (COOLDOWN_TIME[city] > 0 && COOLDOWN_OWNER[city] == rank) {
+            updated = TRUE;
+            COOLDOWN_TIME[city]--;
+            
+            if (COOLDOWN_TIME[city] == 0) {
+                COOLDOWN_OWNER[city] = -1;
+                broadcast_cooldown_update(city, 0);
+                
+            }
+            else {
+                broadcast_cooldown_update(city, COOLDOWN_TIME[city]);
+            }
+        }
+    }
+    if(updated) {
+        lamport_clock++;
+    }
 }
 
 void handle_cooldown_update(cooldown_packet_t *pkt) {
@@ -174,33 +218,15 @@ void handle_cooldown_update(cooldown_packet_t *pkt) {
     lamport_clock++;
     
     COOLDOWN_TIME[pkt->city] = pkt->cooldown;
-    COOLDOWN_OWNER[pkt->city] = pkt->owner;  // Zapisz kto ustawił cooldown
+    COOLDOWN_OWNER[pkt->city] = pkt->owner;
     
-    if (pkt->cooldown == 0) {
-        process_queue(pkt->city);
-    }
-}
-
-void update_cooldowns() {
-    for (int city = 0; city < M; city++) {
-        // Tylko proces który ustawił cooldown może go zmniejszać
-        if (COOLDOWN_TIME[city] > 0 && COOLDOWN_OWNER[city] == rank) {
-            COOLDOWN_TIME[city]--;
-            
-            if (COOLDOWN_TIME[city] == 0) {
-                printf("[%d] City %d cooldown expired (clock: %d)\n", 
-                       rank, city, lamport_clock);
-                COOLDOWN_OWNER[city] = -1;  // Reset właściciela
-                broadcast_cooldown_update(city, 0);
-            }
-            else {
-                // Aktualizuj innych o nowym czasie cooldown
-                broadcast_cooldown_update(city, COOLDOWN_TIME[city]);
-            }
-            lamport_clock++;
-        }
-    }
-
+    // if (pkt->cooldown == 0) {
+    //     // Jeśli czekaliśmy na to miasto i mamy już wszystkie ACK
+    //     if (state == WAITING && my_city == pkt->city && ack_count == N-1) {
+    //         enter_city();
+    //     }
+    //     process_queue(pkt->city);
+    // }
 }
 
 void enter_city() {
@@ -240,8 +266,8 @@ void handle_ack(packet_t *pkt) {
     lamport_clock = (pkt->lamport > lamport_clock) ? pkt->lamport : lamport_clock;
     lamport_clock++;
     
-    if (pkt->city != my_city) {
-        return; // ACK for wrong city
+    if (pkt->city != my_city || state != REQUESTING) {
+        return; // ACK dla niewłaściwego miasta lub nie jesteśmy w stanie REQUESTING
     }
     
     ack_count++;
@@ -251,16 +277,6 @@ void handle_ack(packet_t *pkt) {
             enter_city();
         } else {
             state = WAITING;
-            printf("[%d] WAITING for city %d (cooldown: %d)\n", 
-                   rank, my_city, COOLDOWN_TIME[my_city]);
-            
-            while (COOLDOWN_TIME[my_city] > 0) {
-                update_cooldowns();
-                sleep(1);
-                lamport_clock++;
-            }
-            
-            enter_city();
         }
     }
 }
@@ -277,15 +293,15 @@ void handle_req(packet_t *pkt) {
     (state == REQUESTING && (city != my_city)) ||
     (state == IN_CITY && city != my_city) ||
     (state == REQUESTING && city == my_city &&
-        (pkt->lamport < req_lamport_clock ||
-        (pkt->lamport == req_lamport_clock && pkt->src < rank)))) {
+    (pkt->lamport < my_request_lamport ||
+    (pkt->lamport == my_request_lamport && pkt->src < rank)))) {
         
         packet_t ack_pkt = {rank, lamport_clock, city, ACK};
         MPI_Send(&ack_pkt, 1, MPI_PAKIET_T, pkt->src, ACK, MPI_COMM_WORLD);
     } 
     // Otherwise queue the request
-    else if (add_to_queue(pkt->src, pkt->lamport, city)) {
-        printf("[%d] Queued request from %d for city %d\n", rank, pkt->src, city);
+    else {
+        add_to_queue(pkt->src, pkt->lamport, city);
     }
 }
 
@@ -338,15 +354,21 @@ int main(int argc, char **argv) {
     srand(time(0) + rank);
     
     while (1) {
-        update_cooldowns();
-        
-        if (state == IDLE && (rand() % 5) == 0) {
-            make_request();
-        }
-        
-        receive_messages();
-        sleep(1);
+    update_cooldowns();
+    
+    if (state == IDLE && (rand() % 5) == 0) {
+        make_request();
     }
+    else if (state == WAITING) {
+        // Sprawdź czy cooldown się zakończył (na wypadek gdybyśmy nie dostali update)
+        if (COOLDOWN_TIME[my_city] == 0 && ack_count == N-1) {
+            enter_city();
+        }
+    }
+    
+    receive_messages();
+    sleep(1);
+}
     
     MPI_Type_free(&MPI_PAKIET_T);
     MPI_Type_free(&MPI_COOLDOWN_PACKET_T);
